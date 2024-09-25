@@ -201,12 +201,12 @@ def claptonize(
         coeffs: list[float],
         vqe_pcirc: ParametrizedCliffordCircuit,
         trans_pcirc: ParametrizedCliffordCircuit | None = None,
-        n_proc=10,
-        n_starts=10,
-        n_rounds=None,
-        n_retry_rounds=0,
-        return_n_rounds=False,
-        mix_best_pop_frac=0.2,
+        n_proc: int = 10,
+        n_starts: int = 10,
+        n_rounds: int | None =None,
+        n_retry_rounds: int = 0,
+        return_n_rounds: bool = False,
+        mix_best_pop_frac: float = 0.2,
         **optimizer_and_loss_kwargs
     ):
     sig_handler = SignalHandler()
@@ -219,6 +219,8 @@ def claptonize(
         vqe_pcirc.snapshot_noiseless()
     
     n_proc = n_proc // n_starts
+    if n_proc == 0:
+        n_proc = 1
     initial_populations = [None] * n_starts
     out_data = [-1, [np.inf]*3, None]
     optimizer_and_loss_kwargs["n_proc"] = n_proc
