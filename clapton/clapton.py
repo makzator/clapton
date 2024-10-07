@@ -14,12 +14,14 @@ def loss_func(
         coeffs: list[float], 
         vqe_pcirc: ParametrizedCliffordCircuit, 
         trans_pcirc: ParametrizedCliffordCircuit | None = None, 
+        x_to_k_map = None,
         alpha: float | None = None, 
         return_sublosses: bool = False, 
         **energy_kwargs
     ):
+    k = x_to_k_map(x)
     if trans_pcirc is None:
-        vqe_pcirc.assign(x)
+        vqe_pcirc.assign(k)
         vqe_pcirc.snapshot()
         vqe_pcirc.snapshot_noiseless()
         energy = get_energy(
@@ -38,7 +40,7 @@ def loss_func(
         pauli_weight_loss = 0.
         loss = energy + energy_noiseless
     else:
-        trans_circ = trans_pcirc.assign(x).stim_circuit()
+        trans_circ = trans_pcirc.assign(k).stim_circuit()
         paulis_trans, signs = transform_paulis(trans_circ, paulis)
         coeffs_trans = np.multiply(signs, coeffs)
         # assume vqe_pcirc has stim circuit snapshot with all 0 parameters
@@ -124,7 +126,7 @@ def handle_out_data(
                 callback(out_data)
 
 
-def loss_func_mp(
+def eval_xs_terms_mp(
         xs: list[list[int]], 
         paulis: list[str], 
         coeffs: list[float],
@@ -201,6 +203,7 @@ def claptonize(
         coeffs: list[float],
         vqe_pcirc: ParametrizedCliffordCircuit,
         trans_pcirc: ParametrizedCliffordCircuit | None = None,
+        x_to_k_map = None,
         n_proc: int = 10,
         n_starts: int = 10,
         n_rounds: int | None =None,
@@ -226,6 +229,7 @@ def claptonize(
     optimizer_and_loss_kwargs["n_proc"] = n_proc
     optimizer_and_loss_kwargs["return_best_pop_frac"] = mix_best_pop_frac
     optimizer_and_loss_kwargs["out_data"] = out_data
+    optimizer_and_loss_kwargs["x_to_k_map"] = x_to_k_map
     
     r_idx = 0
     r_idx_last_change = 0
@@ -289,8 +293,9 @@ def claptonize(
                                                 coeffs, 
                                                 vqe_pcirc, 
                                                 trans_pcirc,
+                                                x_to_k_map=x_to_k_map,
                                                 alpha=optimizer_and_loss_kwargs.get("alpha"),
-                                                return_sublosses=True
+                                                return_sublosses=True,
                                                 )
 
         if n_rounds is None:
@@ -328,6 +333,8 @@ def genetic_algorithm(
         n_proc: int = 1,
         out_data: list | None = None,
         callback = None,
+        x_to_k_map = None,
+        x_space = None,
         budget: int = 100,
         population_size: int = 100,
         return_best_pop_frac: int = 0.2,
@@ -344,12 +351,20 @@ def genetic_algorithm(
         **loss_kwargs
     ):
     print(f"started GA at id {master_id} with {n_proc} procs\n")
-    if trans_pcirc is None:
-        gene_space = vqe_pcirc.parameter_space()
-        idc_param_2qb = vqe_pcirc.idc_param_2qb()
+    if x_to_k_map is None:
+        if trans_pcirc is None:
+            gene_space = vqe_pcirc.parameter_space()
+            idc_param_2qb = vqe_pcirc.idc_param_2qb()
+        else:
+            gene_space = trans_pcirc.parameter_space()
+            idc_param_2qb = trans_pcirc.idc_param_2qb()
     else:
-        gene_space = trans_pcirc.parameter_space()
-        idc_param_2qb = trans_pcirc.idc_param_2qb()
+        assert x_space is not None
+        gene_space = x_space
+        # dont know how to handle rn
+        init_no_2qb = False
+        loss_kwargs["x_to_k_map"] = x_to_k_map
+
     num_params = len(gene_space)
     num_generations = budget
     num_genes = num_params
@@ -360,7 +375,7 @@ def genetic_algorithm(
     best_count = int(population_size * return_best_pop_frac)
 
     def fitness_func(ga_instance, solutions, solutions_idc):
-        return -loss_func_mp(
+        return -eval_xs_terms_mp(
             solutions, 
             paulis,
             coeffs,
