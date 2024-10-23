@@ -124,7 +124,7 @@ def handle_out_data(
                 callback(out_data)
 
 
-def loss_func_mp(
+def eval_xs_terms_mp(
         xs: list[list[int]], 
         paulis: list[str], 
         coeffs: list[float],
@@ -360,7 +360,7 @@ def genetic_algorithm(
     best_count = int(population_size * return_best_pop_frac)
 
     def fitness_func(ga_instance, solutions, solutions_idc):
-        return -loss_func_mp(
+        return -eval_xs_terms_mp(
             solutions, 
             paulis,
             coeffs,
