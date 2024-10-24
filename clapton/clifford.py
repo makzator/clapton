@@ -1,7 +1,7 @@
 import stim
 from copy import deepcopy
 from clapton.gate_ids import C1ids, RXids, RYids, RZids, Q2ids
-from clapton.depolarization import DepolarizationModel
+from clapton.depolarization import CliffordNoiseModel, DepolarizationModel, DecoherenceModel
 
 
 class ParametrizedClifford:
@@ -145,7 +145,8 @@ class ParametrizedCliffordCircuit:
         self.inverse_parameter_map = None
         self.measurement_map = None
         self.inverse_measurement_map = None
-        self.depolarization_model = None
+        self.depolarization_model = CliffordNoiseModel()
+        self.decoherence_model = CliffordNoiseModel()
         self.readout_errors = None
         self.circ_snapshot = None
         self.circ_snapshot_noiseless = None
@@ -231,7 +232,7 @@ class ParametrizedCliffordCircuit:
         """
         meas_map = self.get_measurement_map()
         targets = []
-        if self.depolarization_model is None and self.readout_errors is None: 
+        if not self.has_errors(): 
             # if no noise, can directly evaluate measurement
             for v_qb, p in enumerate(pauli):
                 # convert virtual qb (index of p in Pauli) to physical qb in circuit
@@ -253,29 +254,25 @@ class ParametrizedCliffordCircuit:
                 # prepare measurement basis and possibly insert gate errors
                 if p == "X":
                     circ.append("S", p_qb)
-                    if self.depolarization_model is not None:
-                        gate = ParametrizedRZClifford(p_qb).assign(1)
-                        p = self.depolarization_model.get_gate_depolarization(gate)
-                        if p is not None:
-                            circ.append(f"DEPOLARIZE{len(gate.qbs)}", gate.qbs, p)
+                    gate = ParametrizedRZClifford(p_qb).assign(1)
+                    self.depolarization_model.append_noise(circ, gate)
+                    self.decoherence_model.append_noise(circ, gate)
                     circ.append("SQRT_X", p_qb)
-                    if self.depolarization_model is not None:
-                        gate = ParametrizedRXClifford(p_qb).assign(1)
-                        p = self.depolarization_model.get_gate_depolarization(gate)
-                        if p is not None:
-                            circ.append(f"DEPOLARIZE{len(gate.qbs)}", gate.qbs, p)
+                    gate = ParametrizedRXClifford(p_qb).assign(1)
+                    self.depolarization_model.append_noise(circ, gate)
+                    self.decoherence_model.append_noise(circ, gate)
                 elif p == "Y":
                     circ.append("SQRT_X", p_qb)
-                    if self.depolarization_model is not None:
-                        gate = ParametrizedRXClifford(p_qb).assign(1)
-                        p = self.depolarization_model.get_gate_depolarization(gate)
-                        if p is not None:
-                            circ.append(f"DEPOLARIZE{len(gate.qbs)}", gate.qbs, p)
+                    gate = ParametrizedRXClifford(p_qb).assign(1)
+                    self.depolarization_model.append_noise(circ, gate)
+                    self.decoherence_model.append_noise(circ, gate)
                 elif p == "Z":
                     pass
                 else:
                     # no measurement for other characters in Pauli string
                     continue
+                # add measurement decoherence
+                self.decoherence_model.append_noise(circ, "MEAS", p_qb)
                 # if readout errors on this physical qubit, insert bit flip
                 if self.readout_errors is not None and p_qb in self.readout_errors:
                     circ.append("X_ERROR", p_qb, self.readout_errors[p_qb])
@@ -293,17 +290,13 @@ class ParametrizedCliffordCircuit:
         circ = stim.Circuit()
         for gate in self.gates:
             gate_id = gate.get_stim_id()
-            if self.depolarization_model is not None:
-                p = self.depolarization_model.get_gate_depolarization(gate)
-            else:
-                p = None
             if gate_id is not None:
                 if not gate is ParametrizedAny1QClifford:
                     gate_id = [gate_id]
                 for _gate_id in gate_id:
                     circ.append(_gate_id, gate.qbs)
-                if p is not None:
-                    circ.append(f"DEPOLARIZE{len(gate.qbs)}", gate.qbs, p)
+                self.depolarization_model.append_noise(circ, gate)
+                self.decoherence_model.append_noise(circ, gate)
         if pauli is not None:
             self._add_measurements(circ, pauli)
         return circ
@@ -319,10 +312,7 @@ class ParametrizedCliffordCircuit:
         Compute stim circuit without noise and store internally.
         Enables less re-computation during optimization.
         """
-        depol_model = self.depolarization_model
-        self.remove_depolarization()
-        self.circ_snapshot_noiseless = self.stim_circuit(pauli)
-        self.add_depolarization_model(depol_model)
+        self.circ_snapshot_noiseless = self.stim_circuit(pauli).without_noise()
         return self
     def define_parameter_map(self, param_map_dict: dict[int, int] | None):
         """
@@ -416,18 +406,29 @@ class ParametrizedCliffordCircuit:
             return self.inverse_measurement_map
     def has_custom_measurement_map(self):
         return self.measurement_map is not None
-    def add_depolarization_model(self, depol_model):
-        """Addd gate depolarization model or set to None (no errors)."""
-        assert isinstance(depol_model, DepolarizationModel) or depol_model is None
+    def set_depolarization_model(self, depol_model):
+        """Add gate depolarization model or set to empty model."""
+        assert isinstance(depol_model, DepolarizationModel) or type(depol_model) == CliffordNoiseModel
         self.depolarization_model = depol_model
         return self
     def has_depolarization(self):
-        return self.depolarization_model is not None
+        return not type(self.depolarization_model) == CliffordNoiseModel
     def remove_depolarization(self):
         """Reset gate errors to None (no errors)."""
-        self.depolarization_model = None
+        self.depolarization_model = CliffordNoiseModel()
         return self
-    def add_readout_errors(self, r_dict):
+    def set_decoherence_model(self, dec_model):
+        """Add T1/T2 decoherence or set to empty model."""
+        assert isinstance(dec_model, DecoherenceModel) or type(dec_model) == CliffordNoiseModel
+        self.decoherence_model = dec_model
+        return self
+    def has_decoherence(self):
+        return not type(self.decoherence_model) == CliffordNoiseModel
+    def remove_decoherence(self):
+        """Reset decoherence to empty model."""
+        self.decoherence_model = CliffordNoiseModel()
+        return self
+    def set_readout_errors(self, r_dict):
         """
         Add measurement errors, i.e. stochastic bit flips with chance r_error.
         
@@ -443,7 +444,7 @@ class ParametrizedCliffordCircuit:
         self.readout_errors = None
         return self
     def has_errors(self):
-        return self.has_depolarization() or self.has_readout_errors()
+        return self.has_depolarization() or self.has_decoherence() or self.has_readout_errors()
     def number_parametrized_gates(self):
         return sum([1 for gate in self.gates if not gate.is_fixed()])
     def parameter_dimensions(self):

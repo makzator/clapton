@@ -34,13 +34,16 @@ class GateSpecificDepolarizationModel(DepolarizationModel):
             qbs: tuple[int] | tuple[int,int],
             p: float
         ):
-        self.params[gate_id][qbs] = p
+        if not gate_id in self.params:
+            self.params[gate_id] = {qbs: p}
+        else:
+            self.params[gate_id][qbs] = p
     def get_gate_depolarization(self, gate):
         gate_id = gate.get_stim_id()
         if not gate_id in self.params:
             return None
         else:
-            return self.params[gate_id][gate.qbs]
+            return self.params[gate_id].get(gate.qbs)
 
 
 class GateGeneralDepolarizationModel(DepolarizationModel):
@@ -62,33 +65,48 @@ class GateGeneralDepolarizationModel(DepolarizationModel):
     
 
 class DecoherenceModel(CliffordNoiseModel):
-    def __init__(
-            self, 
-            T1: float | None = None,
-            T2: float | None = None
-        ):
-        self.T1 = T1
-        self.T2 = T2
+    def __init__(self):
+        pass
     def get_gate_time(self, gate):
         pass
-    def get_gate_decoherence(self, gate):
-        time = self.get_gate_time(gate)
-        pxy = (1 - np.exp(-time/self.T1))/4
-        pz = (1 - np.exp(-time/self.T2))/2 - pxy
+    def _get_ps(self, time):
+        T1 = self.T1 if self.T1 is not None else np.inf
+        T2 = self.T2 if self.T2 is not None else np.inf
+        pxy = (1 - np.exp(-time/T1))/4
+        pz = (1 - np.exp(-time/T2))/2 - pxy
         return pxy, pz
-    def append_noise(self, circ, gate):
-        pxy, pz = self.get_gate_decoherence(gate)
-        for qb in gate.qbs:
-            circ.append("CORRELATED_ERROR", [stim.target_x(qb)], pxy)
-            circ.append("ELSE_CORRELATED_ERROR", [stim.target_y(qb)], pxy / (1 - pxy))
-            circ.append("ELSE_CORRELATED_ERROR", [stim.target_z(qb)], pz / (1 - 2*pxy))    
-
+    def get_gate_decoherence(self, gate):
+        if self.T1 is None and self.T2 is None:
+            return None
+        else:
+            time = self.get_gate_time(gate)
+            return self._get_ps(time)
+    def _append_noise(self, circ, qb, pxy, pz):
+        circ.append("CORRELATED_ERROR", [stim.target_x(qb)], pxy)
+        circ.append("ELSE_CORRELATED_ERROR", [stim.target_y(qb)], pxy / (1 - pxy))
+        circ.append("ELSE_CORRELATED_ERROR", [stim.target_z(qb)], pz / (1 - 2*pxy))
+    def append_noise(self, circ, gate, qb=None):
+        if gate == "MEAS":
+            assert qb is not None
+            qbs = (qb, )
+        else:
+            qbs = gate.qbs
+        dec = self.get_gate_decoherence(gate)
+        if dec is not None:
+            pxy, pz = dec
+            for qb in qbs:
+                self._append_noise(circ, qb, pxy, pz)
+                
 
 class GateSpecificDecoherenceModel(DecoherenceModel):
     def __init__(
             self, 
+            T1: float | None = None,
+            T2: float | None = None,
             params: dict[str, float] = {}
         ):
+        self.T1 = T1
+        self.T2 = T2
         self.params = params
     def set_gate_time(
             self, 
@@ -97,7 +115,10 @@ class GateSpecificDecoherenceModel(DecoherenceModel):
         ):
         self.params[gate_id] = time
     def get_gate_time(self, gate):
-        gate_id = gate.get_stim_id()
+        if gate == "MEAS":
+            gate_id = "MEAS"
+        else:
+            gate_id = gate.get_stim_id()
         if not gate_id in self.params:
             return 0.
         else:
@@ -107,12 +128,20 @@ class GateSpecificDecoherenceModel(DecoherenceModel):
 class GateGeneralDecoherenceModel(DecoherenceModel):
     def __init__(
             self, 
+            T1: float | None = None,
+            T2: float | None = None,
             time1: float = 0.,
-            time2: float = 0.
+            time2: float = 0.,
+            time_meas: float = 0.
         ):
+        self.T1 = T1
+        self.T2 = T2
         self.time1 = time1
         self.time2 = time2
+        self.time_meas = time_meas
     def get_gate_time(self, gate):
+        if gate == "MEAS":
+            return self.time_meas
         if len(gate.qbs) == 1:
             time = self.time1
         elif len(gate.qbs) == 2:
